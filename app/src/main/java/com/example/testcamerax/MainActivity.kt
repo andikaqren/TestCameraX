@@ -6,6 +6,7 @@ import android.content.ContentValues.TAG
 import android.content.pm.PackageManager
 import android.location.Address
 import android.location.Geocoder
+import android.location.Location
 
 import android.os.Bundle
 import android.os.Looper
@@ -48,119 +49,81 @@ class MainActivity : AppCompatActivity() {
     private lateinit var recognizer: TextRecognizer
     private lateinit var api: ApiService
 
+    private val PERMISSIONS = arrayOf(
+        Manifest.permission.CAMERA,
+        Manifest.permission.ACCESS_COARSE_LOCATION
+    )
+
     val locationRequest = LocationRequest.create()
         .setInterval(10000) // 10 seconds
         .setFastestInterval(5000) // 5 seconds
         .setPriority(LocationRequest.PRIORITY_HIGH_ACCURACY)
 
+    private val locationCallback = object : LocationCallback() {
+        override fun onLocationResult(p0: LocationResult) {
+            p0.let { result ->
+                result.lastLocation.let {
+                    showLocation(it)
+                }
 
+            }
+        }
+    }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         binding = ActivityMainBinding.inflate(layoutInflater)
-
         setContentView(binding.root)
-
         recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-
         cameraExecutor = Executors.newSingleThreadExecutor()
-
-        if (!arePermissionsGranted()) {
-            requestPermissions()
-        } else {
+        val retrofit = Retrofit.Builder()
+            .baseUrl("https://maps.googleapis.com")
+            .addConverterFactory(GsonConverterFactory.create())
+            .build()
+        api = retrofit.create(ApiService::class.java)
+        if (arePermissionsGranted()) {
             startCamera()
+        } else {
+            requestPermissions()
         }
-
     }
 
 
     private fun startCamera() {
-
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
-
-        // Set up the camera capture button
-
         binding.btnCapture.setOnClickListener {
-            // Create a file to save the captured image
             val outputDirectory = getOutputDirectory()
             val photoFile = File(outputDirectory, "${System.currentTimeMillis()}.jpg")
-
-            // Take a picture using the image capture use case
-            imageCapture.takePicture(
-                ContextCompat.getMainExecutor(this),
-                object : ImageCapture.OnImageCapturedCallback() {
-                    override fun onCaptureSuccess(image: ImageProxy) {
-                        // Process the captured image to recognize text
-                        processImage(image, photoFile)
-                        getLocation()
-                        super.onCaptureSuccess(image)
-                    }
-                })
-        }
-
-        // Set up the camera preview
-        cameraProviderFuture.addListener({
-            // Initialize the camera provider and image capture use case
-            cameraProvider = cameraProviderFuture.get()
-            imageCapture = ImageCapture.Builder()
-                .setTargetRotation(binding.viewFinder.display.rotation)
-                .build()
-
-            // Set up the camera preview use case
-            val preview = Preview.Builder()
-                .build()
-                .also {
-                    it.setSurfaceProvider(binding.viewFinder.surfaceProvider)
+            imageCapture.takePicture(ContextCompat.getMainExecutor(this), object : ImageCapture.OnImageCapturedCallback() {
+                override fun onCaptureSuccess(image: ImageProxy) {
+                    processImage(image, photoFile)
+                    getLocation()
+                    super.onCaptureSuccess(image)
                 }
-
-            // Select the back camera as the default
+            })
+        }
+        cameraProviderFuture.addListener({
+            cameraProvider = cameraProviderFuture.get()
+            imageCapture = ImageCapture.Builder().setTargetRotation(binding.viewFinder.display.rotation).build()
+            val preview = Preview.Builder().build().also { it.setSurfaceProvider(binding.viewFinder.surfaceProvider) }
             val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-
             try {
-                // Unbind any previously bound use cases
                 cameraProvider.unbindAll()
-
-                // Bind the preview and image capture use cases to the camera
-                cameraProvider.bindToLifecycle(
-                    this,
-                    cameraSelector,
-                    preview,
-                    imageCapture
-                )
-
+                cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageCapture)
             } catch (exc: Exception) {
                 Log.e(TAG, "Unable to bind camera use cases", exc)
             }
         }, ContextCompat.getMainExecutor(this))
-
     }
 
     private fun requestPermissions() {
-        val permissions = arrayOf(
-            Manifest.permission.CAMERA,
-            Manifest.permission.ACCESS_COARSE_LOCATION
-        )
-        val requestCode = PERMISSION_CODE
-
-        val cameraPermission = ContextCompat.checkSelfPermission(this, permissions[0])
-        val locationPermission = ContextCompat.checkSelfPermission(this, permissions[1])
-
         val permissionList = ArrayList<String>()
-
-        if (cameraPermission != PackageManager.PERMISSION_GRANTED) {
-            permissionList.add(permissions[0])
+        for (permission in PERMISSIONS) {
+            if (ContextCompat.checkSelfPermission(this, permission) != PackageManager.PERMISSION_GRANTED) {
+                permissionList.add(permission)
+            }
         }
-
-        if (locationPermission != PackageManager.PERMISSION_GRANTED) {
-            permissionList.add(permissions[1])
-        }
-
         if (permissionList.isNotEmpty()) {
-            ActivityCompat.requestPermissions(
-                this,
-                permissionList.toTypedArray(),
-                requestCode
-            )
+            ActivityCompat.requestPermissions(this, permissionList.toTypedArray(), PERMISSION_CODE)
         }
     }
 
@@ -169,16 +132,13 @@ class MainActivity : AppCompatActivity() {
         val mediaImage = image.image ?: return
         val imageRotation = image.imageInfo.rotationDegrees
         val inputImage = InputImage.fromMediaImage(mediaImage, imageRotation)
-
         // Pass the image to the text recognizer and extract the recognized text
         recognizer.process(inputImage)
             .addOnSuccessListener { visionText ->
                 val recognizedText = visionText.text
-
                 // Display the recognized text in a TextView or save it to a file
                 binding.textView.text = recognizedText
                 photoFile.writeText(recognizedText)
-
                 // Close the image to free up resources
                 image.close()
             }
@@ -198,23 +158,18 @@ class MainActivity : AppCompatActivity() {
     }
 
 
-    // Check if the CAMERA permission is granted
-    private fun isLocationPermissionGranted(): Boolean {
+    private fun isPermissionGranted(permission: String): Boolean {
         return ContextCompat.checkSelfPermission(
             this,
-            Manifest.permission.ACCESS_COARSE_LOCATION
-        ) == PackageManager.PERMISSION_GRANTED
-    }
-
-    private fun isCameraPermissionGranted(): Boolean {
-        return ContextCompat.checkSelfPermission(
-            this,
-            Manifest.permission.CAMERA
+            permission
         ) == PackageManager.PERMISSION_GRANTED
     }
 
     private fun arePermissionsGranted(): Boolean {
-        return isLocationPermissionGranted() && isCameraPermissionGranted()
+        return listOf(
+            Manifest.permission.ACCESS_COARSE_LOCATION,
+            Manifest.permission.CAMERA
+        ).all { isPermissionGranted(it) }
     }
 
 
@@ -238,70 +193,58 @@ class MainActivity : AppCompatActivity() {
 
     @SuppressLint("MissingPermission")
     private fun getLocation() {
-        val retrofit = Retrofit.Builder()
-            .baseUrl("https://maps.googleapis.com")
-            .addConverterFactory(GsonConverterFactory.create())
-            .build()
-        api = retrofit.create(ApiService::class.java)
         val fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
         fusedLocationClient.requestLocationUpdates(
             locationRequest,
             locationCallback,
             Looper.getMainLooper()
         )
-
     }
 
-    private var locationCallback = object : LocationCallback() {
-        override fun onLocationResult(locationResult: LocationResult) {
-            val location = locationResult.lastLocation
-            val origin = "${location.latitude},${location.longitude}"
-            val destination = "Plaza Indonesia Jakarta"
-            val units = "metric"
-            val mode = "driving"
-            val apiKey = ""
-            val geocoder = Geocoder(this@MainActivity, Locale.getDefault())
-            val addresses: MutableList<Address>? = geocoder.getFromLocation(location.latitude, location.longitude, 1)
-            val cityName = addresses?.get(0)?.locality // This will give you the city name
-            Toast.makeText(
-                this@MainActivity,
-                "HORE",
-                Toast.LENGTH_SHORT
-            ).show()
-            // Call the Distance Matrix API and handle the response
-            val call: Call<DistanceMatrixResponse> =
-                api.getDistanceMatrix(origin, destination, units, mode, apiKey)
-            call.enqueue(object :
-                Callback<DistanceMatrixResponse> {
-                override fun onResponse(
-                    call: Call<DistanceMatrixResponse>,
-                    response: Response<DistanceMatrixResponse>
-                ) {
-                    if (response.isSuccessful) {
-                        // Handle the successful response
-                        val distance =
-                            response.body()?.rows?.get(0)?.elements?.get(0)?.distance?.text
-                        val duration =
-                            response.body()?.rows?.get(0)?.elements?.get(0)?.duration?.text
+    private fun showLocation(location: Location){
+        val origin = "${location.latitude},${location.longitude}"
+        val destination = "Plaza Indonesia Jakarta"
+        val units = "metric"
+        val mode = "driving"
+        val apiKey = ""
+        val geocoder = Geocoder(this@MainActivity, Locale.getDefault())
+        val addresses: MutableList<Address>? = geocoder.getFromLocation(location.latitude, location.longitude, 1)
+        val cityName = addresses?.get(0)?.locality // This will give you the city name
+        // Call the Distance Matrix API and handle the response
+        val call: Call<DistanceMatrixResponse> =
+            api.getDistanceMatrix(origin, destination, units, mode, apiKey)
+        call.enqueue(object :
+            Callback<DistanceMatrixResponse> {
+            override fun onResponse(
+                call: Call<DistanceMatrixResponse>,
+                response: Response<DistanceMatrixResponse>
+            ) {
+                if (response.isSuccessful) {
+                    // Handle the successful response
+                    val distance =
+                        response.body()?.rows?.get(0)?.elements?.get(0)?.distance?.text
+                    val duration =
+                        response.body()?.rows?.get(0)?.elements?.get(0)?.duration?.text
 
-                        binding.textViewLocation.text ="My current location is $cityName:, which is located  $distance away from Plaza Indonesia Jakarta.  The estimated travel duration by car is  $duration."
-                        // Update the UI with the distance and duration values
-                    } else {
-                        // Handle the unsuccessful response
-                        Toast.makeText(
-                            this@MainActivity,
-                            "Error: ${response.code()}",
-                            Toast.LENGTH_SHORT
-                        ).show()
-                    }
+                    binding.textViewLocation.text ="My current location is $cityName:, which is located  $distance away from Plaza Indonesia Jakarta.  The estimated travel duration by car is  $duration."
+                    // Update the UI with the distance and duration values
+                } else {
+                    // Handle the unsuccessful response
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Error: ${response.code()}",
+                        Toast.LENGTH_SHORT
+                    ).show()
                 }
+            }
 
-                override fun onFailure(call: Call<DistanceMatrixResponse>, t: Throwable) {
-                    // Handle the failure
-                    Toast.makeText(this@MainActivity, "Error: ${t.message}", Toast.LENGTH_SHORT)
-                        .show()
-                }
-            })
-        }
+            override fun onFailure(call: Call<DistanceMatrixResponse>, t: Throwable) {
+                // Handle the failure
+                Toast.makeText(this@MainActivity, "Error: ${t.message}", Toast.LENGTH_SHORT)
+                    .show()
+            }
+        })
     }
+
+
 }
